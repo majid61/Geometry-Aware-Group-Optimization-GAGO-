@@ -1,0 +1,182 @@
+%% demo_compare_gago_baselines.m
+% Compares the improved GAGO (multiresolution version, gago.m) against four standard
+% baselines: PSO, DE, Simulated Annealing, and Nelder-Mead.
+%
+% Follows the paper's comparison protocol (Sec. 5.9-5.14):
+%   - same benchmark functions, dimension, and initial points for every
+%     method (Sec. 5.9);
+%   - a common objective-function evaluation budget NFE_max (Sec. 5.10);
+%   - mean / median / std of the absolute objective error Ef = |f-f*|
+%     (Eq. 129, Sec. 5.11-5.14);
+%   - explicitly defined error ratio RE(A,B) = E_A / E_B (Eq. 168) and
+%     percentage reduction PE(A,B) = 100*(1 - E_A/E_B) (Eq. 171), both
+%     computed relative to GAGO.
+%
+% In addition to the printed tables and figures, the script writes
+% 'results_tables.tex': English LaTeX tables (booktabs) that can be included
+% in the paper with  \input{results_tables.tex}  (needs \usepackage{booktabs}).
+
+clear; clc; close all;
+addpath(pwd);
+
+rng(1);                          % fixed seed -> reproducibility
+
+% ---------------------------------------------------------------
+% Experimental configuration
+% ---------------------------------------------------------------
+benchmarks = {'sphere', 'rastrigin', 'ackley', 'rosenbrock'};
+d        = 5;
+R        = 30;                   % independent runs
+NFE_max  = 4000;                 % common evaluation budget for ALL methods
+tol      = 1e-10;
+
+method_names = {'GAGO-MR', 'GAGO-A(v1)', 'PSO', 'DE', 'SA', 'Nelder--Mead'};
+
+results = struct();
+EfAll   = cell(1, numel(benchmarks));   % raw errors per benchmark, for the LaTeX export
+
+for bidx = 1:numel(benchmarks)
+    bname = benchmarks{bidx};
+    B = benchmark_functions(bname, d);
+    lb = B.domain(1); ub = B.domain(2);
+    fprintf('\n=== Benchmark: %s (d=%d, f* = %g) ===\n', bname, d, B.fstar);
+
+    X0 = lb + (ub-lb)*rand(R, d);   % same initial points for every method
+
+    Ef   = zeros(R, numel(method_names));
+    NFEs = zeros(R, numel(method_names));
+    curves = cell(R, numel(method_names));
+
+    for r = 1:R
+        x0 = X0(r,:);
+
+        % ---------------- GAGO-MR (multiresolution, gago.m) ----------------
+        gopts = struct('lb', lb, 'ub', ub, 'delta0', 0.15, 'dexp', 1e-2, ...
+                        'dfin', 1e-9, 'L', 4, 'split', 0.7, ...
+                        'NFE_max', NFE_max, 'fstar', B.fstar, 'tol', tol);
+        [~, f1, out1] = gago(B.f, x0, gopts);
+
+        % ---------------- GAGO-A(v1) (literal variant, gago_v1.m) ----------------
+        vopts = struct('variant', 'A', 'delta', 0.1, 'L', 6, 'M', 15, ...
+                        'rho_min', 1, 'rho_max', 8, 'eta_up', 1.5, 'eta_down', 0.7, ...
+                        'NFE_max', NFE_max, 'fstar', B.fstar, 'tol', tol);
+        [~, f6, out6] = gago_v1(B.f, x0, vopts);
+
+        % ---------------- PSO ----------------
+        popts = struct('Np', 20, 'w', 0.7, 'c1', 1.5, 'c2', 1.5, ...
+                        'NFE_max', NFE_max, 'fstar', B.fstar, 'tol', tol);
+        [~, f3, out3] = pso_optimizer(B.f, lb, ub, d, popts);
+
+        % ---------------- DE ----------------
+        deopts = struct('Np', 20, 'F', 0.6, 'CR', 0.9, ...
+                         'NFE_max', NFE_max, 'fstar', B.fstar, 'tol', tol);
+        [~, f4, out4] = de_optimizer(B.f, lb, ub, d, deopts);
+
+        % ---------------- Simulated Annealing ----------------
+        saopts = struct('T0', 10, 'alpha', 0.95, 'cool_every', 20, ...
+                         'sigma0', 0.1, 'NFE_max', NFE_max, ...
+                         'fstar', B.fstar, 'tol', tol);
+        [~, f5, out5] = sa_optimizer(B.f, x0, lb, ub, saopts);
+
+        % ---------------- Nelder-Mead ----------------
+        nmopts = struct('step', 0.1, 'NFE_max', NFE_max, ...
+                         'fstar', B.fstar, 'tol', tol);
+        [~, f7, out7] = nelder_mead_optimizer(B.f, x0, lb, ub, nmopts);
+
+        % column order = method_names
+        fvals = [f1, f6, f3, f4, f5, f7];
+        outs  = {out1, out6, out3, out4, out5, out7};
+
+        for mi = 1:numel(method_names)
+            Ef(r, mi)   = abs(fvals(mi) - B.fstar);
+            NFEs(r, mi) = outs{mi}.NFE;
+            curves{r, mi} = running_best(outs{mi}.fhist, outs{mi}.nfehist, NFE_max, B.fstar);
+        end
+    end
+
+    EfAll{bidx} = Ef;
+    results.(bname).Ef   = Ef;
+    results.(bname).NFEs = NFEs;
+    results.(bname).curves = curves;
+
+    % ---- table: mean / median / std of Ef, mean NFE ----
+    fprintf('%-14s %12s %12s %12s %10s\n', 'Method', 'mean(Ef)', 'median(Ef)', 'std(Ef)', 'NFE');
+    for mi = 1:numel(method_names)
+        fprintf('%-14s %12.4g %12.4g %12.4g %10.1f\n', method_names{mi}, ...
+            mean(Ef(:,mi)), median(Ef(:,mi)), std(Ef(:,mi)), mean(NFEs(:,mi)));
+    end
+
+    % ---- error ratio and percentage reduction relative to GAGO-A ----
+    % RE(GAGO,B) = E_GAGO / E_B ,  PE(GAGO,B) = 100*(1 - E_GAGO/E_B)   [Eq. 168,171]
+    fprintf('\n%-14s %14s %18s\n', 'vs. GAGO', 'RE(GAGO,B)', 'PE(GAGO,B) [%]');
+    EA = mean(Ef(:,1));
+    for mi = 2:numel(method_names)
+        EB = mean(Ef(:,mi));
+        if EB > 0
+            RE = EA / EB;
+            PE = 100*(1 - RE);
+            fprintf('%-14s %14.4g %18.2f\n', method_names{mi}, RE, PE);
+        else
+            fprintf('%-14s %14s %18s\n', method_names{mi}, 'n/a (EB=0)', 'n/a');
+        end
+    end
+
+    % ---- convergence plot ----
+    figure('Name', ['GAGO vs baselines - ' bname], 'Color', 'w');
+    hold on; grid on;
+    colors = lines(numel(method_names));
+    for mi = 1:numel(method_names)
+        C = curves(:, mi);
+        n = min(cellfun(@numel, C));
+        Mc = cell2mat(cellfun(@(c) c(1:n)', C, 'UniformOutput', false));
+        meancurve = mean(Mc, 1);
+        plot(1:n, log10(meancurve + eps), 'LineWidth', 1.6, 'Color', colors(mi,:), ...
+             'DisplayName', method_names{mi});
+    end
+    xlabel('Objective-function evaluations (NFE)');
+    ylabel('log_{10}(best-so-far error + \epsilon)');
+    title(sprintf('GAGO vs baselines on %s (d=%d)', bname, d));
+    legend('Location', 'northeast');
+end
+
+% =====================================================================
+% LaTeX export (English) -- tables to be included in the paper
+% =====================================================================
+texfile  = 'results_tables.tex';
+if exist(texfile, 'file'), delete(texfile); end
+colNames = cellfun(@(s) [upper(s(1)) s(2:end)], benchmarks, 'UniformOutput', false);
+setup    = sprintf('$d=%d$, $\\mathrm{NFE}_{\\max}=%d$, %d independent runs', d, NFE_max, R);
+
+export_latex_table(texfile, method_names, colNames, EfAll, ...
+    ['Error $E_f$ (mean / median), ' setup '. The lowest mean in each column is in bold.'], ...
+    sprintf('tab:d%d', d), 'meanmedian');
+
+export_latex_table(texfile, method_names, colNames, EfAll, ...
+    ['Error $E_f$ (mean and standard deviation in parentheses), ' setup '.'], ...
+    sprintf('tab:std_d%d', d), 'meanstd');
+
+export_latex_table(texfile, method_names, colNames, EfAll, ...
+    ['Two-sided Mann--Whitney $p$-values of GAGO-MR against each method, ' setup '.'], ...
+    sprintf('tab:pval_d%d', d), 'pvalue', 1);
+
+fprintf('\nLaTeX tables written to %s (use \\input{%s} in the paper).\n', texfile, texfile);
+
+fprintf('\nDone. Convergence figures and the printed tables above summarize\n');
+fprintf('solution quality (Ef), computational effort (NFE), and error ratios\n');
+fprintf('relative to GAGO-MR, per the comparison protocol of Sec. 5.10-5.14.\n');
+
+% =====================================================================
+function curve = running_best(fhist, nfehist, NFE_max, fstar)
+% Best-so-far error curve sampled at every NFE from 1..NFE_max
+% (piecewise-constant between recorded improvement events).
+curve = nan(NFE_max,1);
+fb = fhist(1);
+idx = 1;
+for n = 1:NFE_max
+    while idx < numel(nfehist) && nfehist(idx) <= n
+        fb = min(fb, fhist(idx));
+        idx = idx + 1;
+    end
+    curve(n) = abs(fb - fstar);
+end
+end
